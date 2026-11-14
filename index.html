@@ -84,10 +84,9 @@
         <p class="text-xs text-slate-500 mt-1">Enter Master Password &amp; get Admin Approval</p>
       </div>
 
-      <!-- Password Form View -->
+      <!-- Password Form View (No Username Input) -->
       <div id="passwordStepBox" class="space-y-3">
         <div class="space-y-2">
-          <input type="text" id="operatorNameInput" placeholder="Your Name / ID (Optional)" class="w-full border border-slate-300 rounded-xl px-4 py-2.5 text-center text-xs focus:outline-none focus:ring-2 focus:ring-blue-600 bg-slate-50">
           <input type="password" id="passInput" placeholder="Enter Master Password" class="w-full border border-slate-300 rounded-xl px-4 py-3 text-center text-sm tracking-wider focus:outline-none focus:ring-2 focus:ring-blue-600 bg-slate-50">
           <p id="passError" class="text-xs text-red-600 font-semibold hidden">Incorrect password. Please try again.</p>
         </div>
@@ -357,12 +356,87 @@
       activeReqId = null;
     }
 
-    function getDeviceSummary() {
+    // Automatic Device, Browser & Network Details Collector
+    async function collectClientDetails() {
       const ua = navigator.userAgent;
-      if (/android/i.test(ua)) return "Android Mobile";
-      if (/iPad|iPhone|iPod/.test(ua)) return "iPhone / iOS";
-      if (/Windows/i.test(ua)) return "Windows PC";
-      return "Web Browser";
+      let device = "Unknown Device";
+      let browser = "Browser";
+
+      // Browser detection
+      if (/Edg\//i.test(ua)) browser = "Microsoft Edge";
+      else if (/OPR\//i.test(ua) || /Opera/i.test(ua)) browser = "Opera";
+      else if (/Chrome\//i.test(ua) && !/Edg\//i.test(ua)) browser = "Google Chrome";
+      else if (/Firefox\//i.test(ua)) browser = "Mozilla Firefox";
+      else if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) browser = "Apple Safari";
+
+      // OS & Phone Model detection
+      if (/Android/i.test(ua)) {
+        const androidVer = (ua.match(/Android\s([0-9.]+)/) || [])[1] || "";
+        const modelMatch = ua.match(/Android[^;]+;\s*([^;)]+?)\s*(?:Build|\))/i);
+        const model = modelMatch ? modelMatch[1].trim() : "Android Phone";
+        device = `${model} (Android ${androidVer})`.trim();
+      } else if (/iPhone/i.test(ua)) {
+        const iosVer = (ua.match(/OS\s([0-9_]+)/) || [])[1]?.replace(/_/g, '.') || "";
+        device = `Apple iPhone (iOS ${iosVer})`.trim();
+      } else if (/iPad/i.test(ua)) {
+        device = "Apple iPad";
+      } else if (/Windows NT 10\.0/i.test(ua)) {
+        device = "Windows 10/11 PC";
+      } else if (/Windows/i.test(ua)) {
+        device = "Windows PC";
+      } else if (/Macintosh/i.test(ua)) {
+        device = "Apple Mac";
+      } else if (/Linux/i.test(ua)) {
+        device = "Linux PC";
+      }
+
+      // High-entropy model check (Chrome Android/Desktop)
+      try {
+        if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+          const hints = await navigator.userAgentData.getHighEntropyValues(["model", "platformVersion"]);
+          if (hints.model) {
+            device = `${hints.model} (${navigator.userAgentData.platform || "Mobile"})`;
+          }
+        }
+      } catch (e) {}
+
+      const screenRes = `${window.screen.width}x${window.screen.height}`;
+      const netType = (navigator.connection && navigator.connection.effectiveType)
+        ? navigator.connection.effectiveType.toUpperCase()
+        : "Standard";
+
+      // Public IP, City/State & ISP Lookup (2.5s timeout so login never delays)
+      let ipAddr = "Unavailable";
+      let locationStr = "Unavailable";
+      let ispStr = "Unavailable";
+
+      try {
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 2500);
+        const ipRes = await fetch("https://ipwho.is/", { signal: controller.signal });
+        clearTimeout(tid);
+        const ipData = await ipRes.json();
+        if (ipData && ipData.success) {
+          ipAddr = ipData.ip || "Unavailable";
+          const parts = [ipData.city, ipData.region, ipData.postal].filter(Boolean);
+          locationStr = parts.length > 0 ? parts.join(", ") : (ipData.country || "Unavailable");
+          ispStr = (ipData.connection && ipData.connection.isp) ? ipData.connection.isp : "Unavailable";
+        }
+      } catch (e) {}
+
+      return {
+        device,
+        browser,
+        screenRes,
+        netType,
+        ipAddr,
+        locationStr,
+        ispStr
+      };
+    }
+
+    function escapeMd(str) {
+      return String(str || '').replace(/[_*`\[\]]/g, '');
     }
 
     async function verifyPassword() {
@@ -389,9 +463,11 @@
       try {
         const reqId = Math.random().toString(36).substring(2, 7).toUpperCase();
         activeReqId = reqId;
-        const operatorName = document.getElementById('operatorNameInput').value.trim() || "Unknown User";
-        const deviceInfo = getDeviceSummary();
-        const timeStr = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const info = await collectClientDetails();
 
         let lastUpdateId = 0;
         try {
@@ -402,12 +478,20 @@
           }
         } catch (e) {}
 
-        const messageText =
-          `🔐 *Smart Meter QC Login Request*\n\n` +
-          `👤 *User:* ${operatorName}\n` +
-          `📱 *Device:* ${deviceInfo}\n` +
-          `🕒 *Time:* ${timeStr}\n` +
-          `🆔 *Req ID:* \`${reqId}\`\n\n` +
+        const detailsBlock =
+          `📱 *Device:* ${escapeMd(info.device)}\n` +
+          `🌐 *Browser:* ${escapeMd(info.browser)} (${info.screenRes})\n` +
+          `📍 *Location:* ${escapeMd(info.locationStr)}\n` +
+          `📡 *IP / ISP:* \`${info.ipAddr}\` (${escapeMd(info.ispStr)})\n` +
+          `📶 *Network:* ${info.netType}\n` +
+          `📅 *Date & Time:* ${dateStr}, ${timeStr}\n` +
+          `🆔 *Request ID:* \`${reqId}\``;
+
+        const requestMessage =
+          `🔐 *SMART METER QC — LOGIN REQUEST*\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `${detailsBlock}\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
           `Kya aap is login ko allow karna chahte hain?`;
 
         const sendRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -415,7 +499,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             chat_id: ADMIN_CHAT_ID,
-            text: messageText,
+            text: requestMessage,
             parse_mode: "Markdown",
             reply_markup: {
               inline_keyboard: [[
@@ -445,8 +529,15 @@
           secondsLeft--;
           timerEl.innerText = `Expires in ${secondsLeft}s`;
           if (secondsLeft <= 0) {
+            const expTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
             cancelApprovalWait("Request timed out (60s). Please try again.");
-            updateTelegramMessage(sentMessageId, `⌛ *Request Expired (${reqId})* — ${operatorName}`);
+            updateTelegramMessage(
+              sentMessageId,
+              `⌛ *REQUEST EXPIRED (60s Timeout)*\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━\n` +
+              `${detailsBlock}\n` +
+              `⏱ *Expired At:* ${expTime}`
+            );
           }
         }, 1000);
 
@@ -463,15 +554,32 @@
               if (item.callback_query && item.callback_query.data) {
                 const cbData = item.callback_query.data;
                 const cbId = item.callback_query.id;
+                const actionTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
                 if (cbData === `approve_${reqId}`) {
                   answerTelegramCallback(cbId, "✅ Login Approved!");
-                  updateTelegramMessage(sentMessageId, `✅ *APPROVED* (${reqId})\n👤 User: ${operatorName} (${deviceInfo})`);
+                  updateTelegramMessage(
+                    sentMessageId,
+                    `✅ *ACCESS APPROVED*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `${detailsBlock}\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🟢 *Status:* Approved by Admin\n` +
+                    `⏱ *Approved At:* ${dateStr}, ${actionTime}`
+                  );
                   unlockScannerUI();
                   return;
                 } else if (cbData === `reject_${reqId}`) {
                   answerTelegramCallback(cbId, "❌ Login Rejected!");
-                  updateTelegramMessage(sentMessageId, `❌ *REJECTED* (${reqId})\n👤 User: ${operatorName} (${deviceInfo})`);
+                  updateTelegramMessage(
+                    sentMessageId,
+                    `❌ *ACCESS REJECTED*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `${detailsBlock}\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🔴 *Status:* Rejected by Admin\n` +
+                    `⏱ *Rejected At:* ${dateStr}, ${actionTime}`
+                  );
                   cancelApprovalWait("❌ Access Rejected by Admin.");
                   return;
                 }
